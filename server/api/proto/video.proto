@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+// 视频服务契约：拆服务后由 video-svc 提供，供 user/interaction 服务读取视频信息与统计。
+package video;
+
+option go_package = "fake_tiktok/api/pb";
+
+service VideoService {
+  rpc GetVideo(GetVideoReq) returns (VideoBrief);
+  rpc GetVideos(GetVideosReq) returns (GetVideosResp);
+  rpc ListUserVideos(ListUserVideosReq) returns (VideoListResp);
+  rpc GetUserStats(GetUserStatsReq) returns (UserStats);
+  rpc IsVideoOwner(IsVideoOwnerReq) returns (BoolResp);
+}
+
+message GetVideoReq {
+  uint64 video_id = 1;
+}
+
+message GetVideosReq {
+  repeated uint64 video_ids = 1;
+}
+
+message VideoBrief {
+  uint64 id = 1;
+  string author_id = 2;
+  string title = 3;
+  string status = 4;
+  string cover_url = 5;
+  string play_url = 6;
+  double duration = 7;
+  int64 play_count = 8;
+  int64 like_count = 9;
+  int64 comment_count = 10;
+  int64 created_at_unix = 11;
+  string description = 13;
+}
+
+message GetVideosResp {
+  repeated VideoBrief videos = 1;
+}
+
+message ListUserVideosReq {
+  string user_id = 1;
+  int32 page = 2;
+  int32 page_size = 3;
+}
+
+message VideoListResp {
+  repeated VideoBrief videos = 1;
+  int64 total = 2;
+}
+
+message GetUserStatsReq {
+  string user_id = 1;
+}
+
+message UserStats {
+  int64 video_count = 1;
+  int64 total_play_count = 2;
+  int64 total_like_count = 3;
+}
+
+message IsVideoOwnerReq {
+  uint64 video_id = 1;
+  string user_id = 2;
+}
+
+message BoolResp {
+  bool ok = 1;
+}

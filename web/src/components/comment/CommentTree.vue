@@ -10,17 +10,14 @@ import { useUserStore } from '@/stores/user'
 import CommentItem from './CommentItem.vue'
 import Pagination from '@/components/common/Pagination.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
-import { calcLevel } from '@/utils/level'
 
 const props = defineProps<{
   videoId: number
-  commentType: 'video' | 'article'
+  commentType: 'video'
 }>()
 
 const userStore = useUserStore()
-const myAvatar = computed(() => userStore.userInfo?.avatar_url || '/uploads/avatar/default.jpg')
-// 当前用户等级（用于评论输入框头像右上角角标）
-const myLevel = computed(() => calcLevel(userStore.userInfo?.experience))
+const myAvatar = computed(() => userStore.userInfo?.avatar_url || '/images/avatar-default.jpg')
 
 const comments = ref<CommentItemType[]>([])
 const page = ref(1)
@@ -142,11 +139,8 @@ onMounted(() => {
           :src="myAvatar"
           alt="me"
           class="w-9 h-9 rounded-full object-cover bg-surface-muted"
-          @error="($event.target as HTMLImageElement).src = '/uploads/avatar/default.jpg'"
+          @error="($event.target as HTMLImageElement).src = '/images/avatar-default.jpg'"
         />
-        <span class="absolute -top-1 -right-1 min-w-[18px] h-[16px] px-1 rounded-full bg-gradient-to-r from-secondary to-primary text-white text-[10px] leading-[16px] text-center font-medium shadow-sm border border-white">
-          {{ myLevel }}
-        </span>
       </div>
       <div class="flex-1 flex gap-2">
         <textarea
@@ -182,11 +176,8 @@ onMounted(() => {
               :src="myAvatar"
               alt="me"
               class="w-7 h-7 rounded-full object-cover bg-surface-muted"
-              @error="($event.target as HTMLImageElement).src = '/uploads/avatar/default.jpg'"
+              @error="($event.target as HTMLImageElement).src = '/images/avatar-default.jpg'"
             />
-            <span class="absolute -top-1 -right-1 min-w-[16px] h-[14px] px-1 rounded-full bg-gradient-to-r from-secondary to-primary text-white text-[9px] leading-[14px] text-center font-medium shadow-sm border border-white">
-              {{ myLevel }}
-            </span>
           </div>
           <textarea
             v-model="replyContent"
@@ -237,11 +228,8 @@ onMounted(() => {
                     :src="myAvatar"
                     alt="me"
                     class="w-6 h-6 rounded-full object-cover bg-surface-muted"
-                    @error="($event.target as HTMLImageElement).src = '/uploads/avatar/default.jpg'"
+                    @error="($event.target as HTMLImageElement).src = '/images/avatar-default.jpg'"
                   />
-                  <span class="absolute -top-1 -right-1 min-w-[14px] h-[12px] px-0.5 rounded-full bg-gradient-to-r from-secondary to-primary text-white text-[8px] leading-[12px] text-center font-medium shadow-sm border border-white">
-                    {{ myLevel }}
-                  </span>
                 </div>
                 <textarea
                   v-model="replyContent"

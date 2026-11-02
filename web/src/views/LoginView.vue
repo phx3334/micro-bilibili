@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getCaptcha, sendEmailCode, login, register } from '@/api/user'
+import { getCaptcha, login, register } from '@/api/user'
 import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
@@ -9,13 +9,11 @@ const router = useRouter()
 const userStore = useUserStore()
 
 const mode = ref<'login' | 'register'>('login')
-const email = ref('')
+const username = ref('')
 const password = ref('')
-const username = ref('') // 注册时必填
 const captchaInput = ref('')
 const captchaId = ref('')
 const captchaImage = ref('')
-const emailCode = ref('')
 const loading = ref(false)
 
 async function refreshCaptcha() {
@@ -28,33 +26,19 @@ async function refreshCaptcha() {
   }
 }
 
-async function handleSendEmailCode() {
-  if (!email.value) return
-  if (!captchaInput.value) return
-  try {
-    await sendEmailCode(email.value, captchaId.value, captchaInput.value)
-    showToast('验证码已发送至邮箱')
-  } catch {
-    refreshCaptcha()
-  }
-}
-
 async function handleSubmit() {
-  if (!email.value || !password.value || !captchaInput.value) return
-  if (mode.value === 'register' && (!username.value || !emailCode.value)) return
+  if (!username.value || !password.value || !captchaInput.value) return
   loading.value = true
   try {
     if (mode.value === 'login') {
-      const res: any = await login(email.value, password.value, captchaId.value, captchaInput.value)
+      const res: any = await login(username.value, password.value, captchaId.value, captchaInput.value)
       userStore.setToken(res.access_token, res.access_token_expire)
       userStore.setUserInfo(res.account)
       redirectAfterAuth()
     } else {
       await register({
         username: username.value,
-        email: email.value,
         password: password.value,
-        verifyCode: emailCode.value,
         captcha_id: captchaId.value,
         captcha: captchaInput.value,
       })
@@ -77,7 +61,6 @@ function redirectAfterAuth() {
 function switchMode() {
   mode.value = mode.value === 'login' ? 'register' : 'login'
   captchaInput.value = ''
-  emailCode.value = ''
   username.value = ''
   refreshCaptcha()
 }
@@ -111,23 +94,13 @@ onMounted(() => {
 
         <!-- 表单 -->
         <form class="space-y-4" @submit.prevent="handleSubmit">
-          <!-- 用户名（注册时） -->
-          <div v-if="mode === 'register'">
+          <!-- 用户名 -->
+          <div>
             <input
               v-model="username"
               type="text"
-              placeholder="用户名（1-20 字符）"
+              :placeholder="mode === 'register' ? '用户名（1-20 字符）' : '用户名'"
               maxlength="20"
-              class="w-full h-11 px-4 bg-surface-subtle rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 transition"
-            />
-          </div>
-
-          <!-- 邮箱 -->
-          <div>
-            <input
-              v-model="email"
-              type="email"
-              placeholder="邮箱"
               class="w-full h-11 px-4 bg-surface-subtle rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 transition"
             />
           </div>
@@ -163,24 +136,6 @@ onMounted(() => {
             />
           </div>
 
-          <!-- 邮箱验证码（注册时） -->
-          <div v-if="mode === 'register'" class="flex gap-2">
-            <input
-              v-model="emailCode"
-              type="text"
-              placeholder="邮箱验证码"
-              maxlength="6"
-              class="flex-1 h-11 px-4 bg-surface-subtle rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 transition"
-            />
-            <button
-              type="button"
-              class="px-3 h-11 rounded-lg text-sm text-secondary border border-secondary hover:bg-secondary/10 transition whitespace-nowrap"
-              @click="handleSendEmailCode"
-            >
-              发送验证码
-            </button>
-          </div>
-
           <!-- 提交按钮 -->
           <button
             type="submit"
@@ -191,11 +146,8 @@ onMounted(() => {
           </button>
         </form>
 
-        <!-- 切换 / 忘记密码 -->
-        <div class="mt-6 flex items-center justify-between text-sm">
-          <router-link to="/forgot-password" class="text-ink-muted hover:text-primary">
-            忘记密码？
-          </router-link>
+        <!-- 切换 -->
+        <div class="mt-6 flex items-center justify-end text-sm">
           <span class="text-ink-muted">
             {{ mode === 'login' ? '没有账号？' : '已有账号？' }}
             <button class="text-primary hover:underline ml-1" @click="switchMode">

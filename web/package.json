@@ -13,12 +13,9 @@
   },
   "dependencies": {
     "artplayer": "^5.1.7",
-    "artplayer-plugin-danmuku": "^5.1.2",
     "axios": "^1.6.5",
-    "clsx": "^2.1.1",
     "lucide-vue-next": "^0.511.0",
     "pinia": "^2.1.7",
-    "tailwind-merge": "^3.3.0",
     "vue": "^3.4.15",
     "vue-router": "^4.2.5"
   },

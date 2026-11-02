@@ -2,7 +2,6 @@
 .env
 .env.local
 server/.env
-server/uploads/
 
 # 前端/后端构建产物
 web/dist

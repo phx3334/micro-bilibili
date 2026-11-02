@@ -1,5 +1,5 @@
 import request from './request'
-import type { HomeVideoInfo, VideoDetailResp, VideoDraftStatusResp, PaginatedResp } from '@/types'
+import type { HomeVideoInfo, VideoDetailResp, VideoStatusResp, PaginatedResp } from '@/types'
 
 // 首页视频列表（游标分页）
 export function getHomeVideoList(cursor: string = '', limit: number = 20, zone: string = '') {
@@ -14,15 +14,15 @@ export function getVideoDetail(video_id: number) {
   return request.get<any, VideoDetailResp>('/video/detail', { params: { video_id } })
 }
 
-// 视频草稿上传
+// 视频上传
 // 注意：不要手动设置 Content-Type，axios 传 FormData 时会自动加上 boundary
 // 返回 { video_id: number }，前端据此轮询转码状态
 // 超时设置为 1 小时（3600000ms）：大文件上传需要足够时间，超时后取消避免无限等待
-export function uploadVideoDraft(
+export function uploadVideo(
   formData: FormData,
   onProgress?: (percent: number) => void
 ) {
-  return request.post<any, { video_id: number }>('/video/draft/upload', formData, {
+  return request.post<any, { video_id: number }>('/video/upload', formData, {
     timeout: 3600000, // 1 小时超时，超时后 axios 自动取消请求（支持大文件上传）
     onUploadProgress: (e) => {
       if (onProgress && e.total) {
@@ -33,8 +33,8 @@ export function uploadVideoDraft(
 }
 
 // 查询转码状态
-export function getVideoDraftStatus(video_id: number) {
-  return request.get<any, VideoDraftStatusResp>('/video/draft/status', { params: { video_id } })
+export function getVideoStatus(video_id: number) {
+  return request.get<any, VideoStatusResp>('/video/status', { params: { video_id } })
 }
 
 // 用户主页视频列表

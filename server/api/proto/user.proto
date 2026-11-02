@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+// 用户服务契约：拆服务后由 user-svc 提供，video/interaction 服务按需调用。
+package user;
+
+option go_package = "fake_tiktok/api/pb";
+
+service UserService {
+  rpc GetUser(GetUserReq) returns (UserInfo);
+  rpc GetUsers(GetUsersReq) returns (GetUsersResp);
+  // IsFollowing 查询 user_id 是否关注了 target_user_id（供视频详情回显关注状态）。
+  rpc IsFollowing(IsFollowingReq) returns (IsFollowingResp);
+}
+
+message GetUserReq {
+  string user_id = 1;
+}
+
+message GetUsersReq {
+  repeated string user_ids = 1;
+}
+
+message UserInfo {
+  string id = 1;
+  string username = 2;
+  string avatar_url = 3;
+  string signature = 4;
+  string gender = 5;
+  string birthday = 6;
+  int64 follower_count = 7;
+  int64 following_count = 8;
+}
+
+message GetUsersResp {
+  repeated UserInfo users = 1;
+}
+
+message IsFollowingReq {
+  string user_id = 1;        // 当前登录用户
+  string target_user_id = 2; // 被查看的用户（视频作者）
+}
+
+message IsFollowingResp {
+  bool is_following = 1;
+}

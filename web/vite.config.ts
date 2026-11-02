@@ -30,20 +30,19 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:8080',
-        changeOrigin: true,
-        // 解决 ECONNRESET：保持长连接，避免 Vite 主动关闭
-        secure: false,
-        ws: false,
-      },
-      '/ws': {
-        target: 'ws://127.0.0.1:8080',
-        ws: true,
+      // 用户服务
+      '/api/v1/user': {
+        target: 'http://localhost:8081',
         changeOrigin: true,
       },
-      '/uploads': {
-        target: 'http://127.0.0.1:8080',
+      // 视频服务
+      '/api/v1/video': {
+        target: 'http://localhost:8082',
+        changeOrigin: true,
+      },
+      // 互动服务
+      '/api/v1/interaction': {
+        target: 'http://localhost:8083',
         changeOrigin: true,
       },
     },

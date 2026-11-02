@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+// 互动服务契约：拆服务后由 interaction-svc 提供，供 video 服务批量读取用户互动状态。
+package interaction;
+
+option go_package = "fake_tiktok/api/pb";
+
+service InteractionService {
+  rpc GetVideoUserState(GetVideoUserStateReq) returns (VideoUserState);
+}
+
+message GetVideoUserStateReq {
+  string user_id = 1;
+  repeated uint64 video_ids = 2;
+}
+
+message VideoUserState {
+  repeated uint64 liked_video_ids = 1;
+}

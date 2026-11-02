@@ -1,17 +1,16 @@
 import request from './request'
-import type { Account, LoginResp, UserLevelResp, CaptchaResp, UserHomeResp, UserBriefResp } from '@/types'
+import type { Account, LoginResp, CaptchaResp, UserHomeResp } from '@/types'
 
 // 用户注册
-// 后端 RegisterReq 字段：username / email / password / verifyCode（邮箱验证码）
-// captcha_id / captcha（图形验证码） 来自 base
-export function register(payload: { username: string; email: string; password: string; verifyCode: string; captcha_id: string; captcha: string }) {
+// 后端 RegisterReq 字段：username / password / captcha_id / captcha（图形验证码）
+export function register(payload: { username: string; password: string; captcha_id: string; captcha: string }) {
   return request.post<any, Account>('/user/register', payload)
 }
 
 // 用户登录
-export function login(email: string, password: string, captcha_id: string, captcha: string) {
+export function login(username: string, password: string, captcha_id: string, captcha: string) {
   return request.post<any, LoginResp>('/user/login', {
-    email,
+    username,
     password,
     captcha_id,
     captcha,
@@ -26,11 +25,6 @@ export function logout() {
 // 获取个人信息
 export function getUserInfo() {
   return request.get<any, Account>('/user/info')
-}
-
-// 获取用户等级
-export function getUserLevel() {
-  return request.get<any, UserLevelResp>('/user/level')
 }
 
 // 修改个人信息
@@ -56,45 +50,12 @@ export function uploadAvatar(file: File) {
   })
 }
 
-// 通用图片上传（收藏夹封面等，multipart/form-data，字段名 file）
-// 后端返回 { url: string }
-export function uploadImage(file: File) {
-  const fd = new FormData()
-  fd.append('file', file)
-  return request.post<any, { url: string }>('/user/upload/image', fd, {
-    timeout: 30000,
-  })
-}
-
-// 找回密码
-export function forgotPassword(payload: {
-  email: string
-  verifyCode: string
-  newPassword: string
-}) {
-  return request.post<any, void>('/user/forgotPassword', payload)
-}
-
-// 发送邮箱验证码
-export function sendEmailCode(email: string, captcha_id: string, captcha: string) {
-  return request.post<any, void>('/base/sendEmainCode', {
-    email,
-    captcha_id,
-    captcha,
-  })
-}
-
 // 获取图形验证码
 export function getCaptcha() {
-  return request.post<any, CaptchaResp>('/base/captcha')
+  return request.post<any, CaptchaResp>('/user/base/captcha')
 }
 
-// 获取用户主页信息（含视频列表、收藏夹、统计数据）
+// 获取用户主页信息（含视频列表、统计数据）
 export function getUserHome(user_id: string, page: number = 1, page_size: number = 20) {
   return request.get<any, UserHomeResp>('/user/home', { params: { user_id, page, page_size } })
-}
-
-// 获取用户简档（供私信入口按 user_id 拉取对端资料，无需手动输入 ID）
-export function getUserBrief(user_id: string) {
-  return request.get<any, UserBriefResp>('/user/brief', { params: { user_id } })
 }

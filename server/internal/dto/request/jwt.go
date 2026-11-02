@@ -2,10 +2,7 @@ package request
 
 import (
 	jwt "github.com/golang-jwt/jwt/v4"
-	"fake_tiktok/internal/domain/database"
 )
-
-
 
 type JwtCustomClaims struct {
 	BaseClaims
@@ -13,11 +10,11 @@ type JwtCustomClaims struct {
 }
 
 type JwtCustomRefreshClaims struct {
-	UserID string 
+	UserID string
+	// 仅携带 UserID，刷新 access token 时无需回查账号库。
 	jwt.RegisteredClaims
 }
 
 type BaseClaims struct {
 	UserID string
-	Role database.Role
 }

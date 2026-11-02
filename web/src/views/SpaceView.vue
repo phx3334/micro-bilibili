@@ -1,12 +1,7 @@
 <script setup lang="ts">
-import { Heart, History, Bell, Coins, CalendarCheck, UserCog, Users, UserPlus } from 'lucide-vue-next'
+import { UserCog, Users, UserPlus } from 'lucide-vue-next'
 
 const navItems = [
-  { to: '/space/favorites', label: '我的收藏', icon: Heart },
-  { to: '/space/history', label: '历史记录', icon: History },
-  { to: '/space/notifications', label: '消息通知', icon: Bell },
-  { to: '/space/coin-ledger', label: '硬币流水', icon: Coins },
-  { to: '/space/daily', label: '每日任务', icon: CalendarCheck },
   { to: '/space/profile', label: '个人资料', icon: UserCog },
   { to: '/space/followers', label: '我的粉丝', icon: Users },
   { to: '/space/following', label: '我的关注', icon: UserPlus },

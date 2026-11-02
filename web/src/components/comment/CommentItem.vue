@@ -106,28 +106,16 @@ function formatTime(time: string): string {
   <div class="flex gap-3 py-3">
     <div class="relative shrink-0">
       <img
-        :src="comment.user?.avatar_url || '/uploads/avatar/default.jpg'"
+        :src="comment.user?.avatar_url || '/images/avatar-default.jpg'"
         :alt="comment.user?.username"
         class="w-9 h-9 rounded-full object-cover shrink-0 bg-surface-muted"
-        @error="($event.target as HTMLImageElement).src = '/uploads/avatar/default.jpg'"
+        @error="($event.target as HTMLImageElement).src = '/images/avatar-default.jpg'"
       />
-      <span
-        v-if="comment.user?.level"
-        class="absolute -top-1 -right-1 min-w-[18px] h-[16px] px-1 rounded-full bg-gradient-to-r from-secondary to-primary text-white text-[10px] leading-[16px] text-center font-medium shadow-sm border border-white"
-      >
-        {{ comment.user.level }}
-      </span>
     </div>
     <div class="flex-1 min-w-0">
       <div class="flex items-center gap-2 flex-wrap">
         <span class="text-sm text-ink-secondary font-medium hover:text-primary cursor-pointer">
           {{ comment.user?.username }}
-        </span>
-        <span
-          v-if="comment.pinned"
-          class="text-[10px] text-primary bg-primary/10 px-1 rounded"
-        >
-          置顶
         </span>
       </div>
       <p class="mt-1 text-sm text-ink break-words whitespace-pre-wrap">{{ comment.content }}</p>

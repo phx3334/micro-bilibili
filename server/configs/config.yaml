@@ -1,0 +1,105 @@
+server:
+  host: ${APP_SERVER_HOST:-0.0.0.0}
+  # 各服务独立端口（未设置环境变量时由 cmd 层回落）：
+  #   user-svc         HTTP 8081 / gRPC 9081
+  #   video-svc        HTTP 8082 / gRPC 9082
+  #   interaction-svc  HTTP 8083 / gRPC 9083
+  port: ${APP_SERVER_PORT:-8080}
+  grpc_port: ${APP_SERVER_GRPC_PORT:-9080}
+  # 内网/演示环境跳过图形验证码校验（生产应保持 false）
+  skip_captcha: ${APP_SKIP_CAPTCHA:-false}
+  router_prefix: ${APP_SERVER_ROUTER_PREFIX:-api/v1}
+
+upload:
+  max_file_size: ${APP_UPLOAD_MAX_FILE_SIZE:-1073741824}
+
+# MinIO（S3 兼容）对象存储：视频/封面/头像全部写入对象存储，DB 只保存对象 key。
+# public_read=true 返回公开直链（初始化时尽力设置匿名 GetObject 桶策略）；
+# public_read=false 返回预签名 GET，有效期由 url_expiry 控制。
+minio:
+  endpoint: ${APP_MINIO_ENDPOINT:-minio:9000}
+  access_key: "${APP_MINIO_ACCESS_KEY:-}"
+  secret_key: "${APP_MINIO_SECRET_KEY:-}"
+  bucket: ${APP_MINIO_BUCKET:-fake-tiktok}
+  use_ssl: ${APP_MINIO_USE_SSL:-false}
+  public_read: ${APP_MINIO_PUBLIC_READ:-true}
+  url_expiry: ${APP_MINIO_URL_EXPIRY:-24h}
+
+transcode:
+  # 转码任务走 Kafka topic（video.transcode）；并发由 worker 副本数（KEDA/副本）控制，
+  # 单进程内不再做多协程并发，超时用于给单次 ffmpeg 执行兜底。
+  timeout: ${APP_TRANSCODE_TIMEOUT:-1800}
+
+ffmpeg:
+  binary_path: ${APP_FFMPEG_BINARY_PATH:-ffmpeg}
+  output_codec: ${APP_FFMPEG_OUTPUT_CODEC:-libx264}
+  crf: ${APP_FFMPEG_CRF:-23}
+  preset: ${APP_FFMPEG_PRESET:-medium}
+
+jwt:
+  access_token_secret: "${APP_JWT_ACCESS_TOKEN_SECRET:-}"
+  refresh_token_secret: "${APP_JWT_REFRESH_TOKEN_SECRET:-}"
+  access_token_expiry_time: ${APP_JWT_ACCESS_TOKEN_EXPIRY_TIME:-15m}
+  refresh_token_expiry_time: ${APP_JWT_REFRESH_TOKEN_EXPIRY_TIME:-7d}
+  issuer: ${APP_JWT_ISSUER:-fake_tiktok}
+
+captcha:
+  height: ${APP_CAPTCHA_HEIGHT:-80}
+  width: ${APP_CAPTCHA_WIDTH:-240}
+  length: ${APP_CAPTCHA_LENGTH:-6}
+  max_skew: ${APP_CAPTCHA_MAX_SKEW:-0.7}
+  dot_count: ${APP_CAPTCHA_DOT_COUNT:-80}
+
+database:
+  host: ${APP_DATABASE_HOST:-mysql}
+  port: ${APP_DATABASE_PORT:-3306}
+  user: ${APP_DATABASE_USER:-root}
+  password: "${APP_DATABASE_PASSWORD:-}"
+  # 每个服务只连自己的库，由 APP_DATABASE_DBNAME 指定：
+  #   feed_user（user-svc）/ feed_video（video-svc、worker）/ feed_interaction（interaction-svc）
+  dbname: ${APP_DATABASE_DBNAME:-feed_user}
+  max_idle_conns: ${APP_DATABASE_MAX_IDLE_CONNS:-10}
+  max_open_conns: ${APP_DATABASE_MAX_OPEN_CONNS:-100}
+  auto_migrate: ${APP_DATABASE_AUTO_MIGRATE:-false}
+
+redis:
+  host: ${APP_REDIS_HOST:-redis}
+  port: ${APP_REDIS_PORT:-6379}
+  password: "${APP_REDIS_PASSWORD:-}"
+  db: ${APP_REDIS_DB:-0}
+  key_prefix: ${APP_REDIS_KEY_PREFIX:-feedsystem:v1}
+
+kafka:
+  brokers:
+    - ${APP_KAFKA_BROKERS:-kafka:9092}
+
+# 各服务调用的下游 gRPC 地址。
+# 客户端懒连接：下游未启动不影响本服务启动，仅对应调用会失败。
+grpc:
+  user_addr: ${APP_GRPC_USER_ADDR:-localhost:9081}
+  video_addr: ${APP_GRPC_VIDEO_ADDR:-localhost:9082}
+  interaction_addr: ${APP_GRPC_INTERACTION_ADDR:-localhost:9083}
+
+zap:
+  level: ${APP_ZAP_LEVEL:-info}
+  # 输出格式：json 便于容器日志（stdout）被 Alloy/Filebeat 采集；console 更适合本地调试。
+  format: ${APP_ZAP_FORMAT:-json}
+  filename: ${APP_ZAP_FILENAME:-/app/logs/fake_tiktok.log}
+  max_size: ${APP_ZAP_MAX_SIZE:-100}
+  max_backups: ${APP_ZAP_MAX_BACKUPS:-15}
+  max_age: ${APP_ZAP_MAX_AGE:-15}
+  compress: ${APP_ZAP_COMPRESS:-false}
+  is_console_print: ${APP_ZAP_IS_CONSOLE_PRINT:-true}
+
+# 可观测性（OpenTelemetry）：Trace 经 OTLP gRPC 推给 otel-collector → Tempo；
+# Metric 走 Prometheus 抓取 /metrics，不做 OTLP push，避免与抓取模型重复。
+otel:
+  enabled: ${APP_OTEL_ENABLED:-false}
+  endpoint: ${APP_OTEL_ENDPOINT:-otel-collector:4317}
+  # 采样率 1.0 表示全量采样；线上流量大时可按比例下调。
+  sample_ratio: ${APP_OTEL_SAMPLE_RATIO:-1.0}
+  service_name: ${APP_OTEL_SERVICE_NAME:-fake_tiktok}
+  environment: ${APP_OTEL_ENVIRONMENT:-local}
+  version: ${APP_OTEL_VERSION:-dev}
+
+run_cron: ${APP_RUN_CRON:-false}

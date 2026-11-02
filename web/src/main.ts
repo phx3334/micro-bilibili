@@ -10,7 +10,7 @@ const app = createApp(App)
 app.use(createPinia())
 app.use(router)
 
-// 启动后若已登录，拉取最新用户信息（含经验/等级），避免 localStorage 中的旧数据
+// 启动后若已登录，拉取最新用户信息，避免 localStorage 中的旧数据
 const userStore = useUserStore()
 if (userStore.isLogin) {
   userStore.fetchUserInfo().catch(() => {})

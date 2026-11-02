@@ -11,136 +11,80 @@ import (
 	"strings"
 	"time"
 
-	"fake_tiktok/internal/config"
-	"fake_tiktok/internal/domain/database"
-	es "fake_tiktok/internal/domain/es"
 	"fake_tiktok/internal/dto/cache"
-	"fake_tiktok/internal/pkg/storage"
-	"fake_tiktok/internal/repository/interfaces"
-	"fake_tiktok/internal/repository/rabbitmq"
-	redis_repo "fake_tiktok/internal/repository/redis"
+	"fake_tiktok/internal/model"
+	"fake_tiktok/pkg/config"
+	"fake_tiktok/pkg/kafkax"
+	"fake_tiktok/pkg/otelx"
+	"fake_tiktok/pkg/storagex"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-// transcodeConsumeLoop 是转码任务消费者的重订阅循环。
+// transcodeConsumeLoop 消费 video.transcode，把每条消息交给 transcodeOne。
 //
-// 与 consumeLoop / userConsumeLoop / likeConsumeLoop 模式完全一致：
-//   - 外层循环：conn.WaitReady → QueueDeclare → Qos → Consume → 内层消息处理
-//   - 内层循环：for msg := range msgs，每条消息解析为 cache.TranscodeMsg 后调用 transcodeOne
-//   - 消息处理成功 / 失败均 Ack（避免死循环重试）；仅 JSON 解析失败时 Nack(false, false) 丢弃
-//   - ctx 取消时把未处理的消息 Nack(requeue=true) 让 broker 重新投递
+// 与其余消费者一致：kafka-go Reader 自动处理重连，ctx 取消后退出并关闭 Reader。
 //
-// 为什么转码失败也 Ack：
-//   - ffmpeg 失败通常是输入文件损坏 / 编码不支持等不可恢复原因
-//   - 重试只会反复失败消耗 CPU
+// 为什么转码失败也提交 offset：
+//   - ffmpeg 失败通常是输入文件损坏 / 编码不支持等不可恢复原因，重试只会反复消耗 CPU
 //   - 失败信息已写入 videos.fail_reason，由用户决定是否重新上传
 //
-// 为什么 JSON 解析失败时 Nack(false, false)（不 requeue）：
-//   - 消息体损坏重试也是损坏，没意义
-//   - false, false 表示丢弃（broker 默认无死信队列时直接丢弃）
-func transcodeConsumeLoop(ctx context.Context, conn *rabbitmq.Connection, db *gorm.DB, storageInstance storage.Storage, ffmpegCfg config.FFmpegConfig, tempDir string, videoSearchRepo interfaces.VideoSearchRepository, logger *zap.Logger) {
-	for {
-		// 1. 阻塞等连接可用：MQ 启动 / 重连期间这里会短暂阻塞
-		ch, err := conn.WaitReady(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				// 主流程已收信号：正常退出
-				return
-			}
-			logger.Warn("transcode consume: wait ready failed", zap.Error(err))
-			time.Sleep(time.Second)
-			continue
+// JSON 解析失败同样由 kafkax.Consume 记录并提交，避免毒消息阻塞分区。
+func transcodeConsumeLoop(ctx context.Context, brokers []string, db *gorm.DB, storageInstance storagex.Storage, ffmpegCfg config.FFmpegConfig, timeout time.Duration, logger *zap.Logger) {
+	reader := kafkax.NewReader(brokers, kafkax.TopicVideoTranscode, "worker-transcode")
+	defer reader.Close()
+
+	kafkax.Consume(ctx, reader, logger, func(ctx context.Context, _, value []byte) error {
+		var m cache.TranscodeMsg
+		if err := json.Unmarshal(value, &m); err != nil {
+			return err
 		}
 
-		// 2. 声明队列（durable + non-auto-delete）
-		//    即便 worker 反复重启，broker 端队列不会丢
-		if _, err := ch.QueueDeclare(redis_repo.TranscodeQueueName, true, false, false, false, nil); err != nil {
-			logger.Warn("transcode consume: queue declare failed", zap.Error(err))
-			time.Sleep(time.Second)
-			continue
+		// 手动埋点：ctx 已由 kafkax.Consume 从消息头续接上传链路的 trace，
+		// 这里的 span 会成为 video.upload 的子 span，能看到"排队 → 转码"耗时。
+		ctx, span := otelx.Tracer("worker-svc").Start(ctx, "worker.transcode",
+			trace.WithAttributes(attribute.Int("video_id", int(m.VideoID))))
+		defer span.End()
+
+		// transcodeOne 内部已处理失败场景（写入 status=failed），
+		// 返回 error 只代表不可恢复的内部错误；仍然提交 offset 避免重试循环
+		if err := transcodeOne(ctx, m, db, storageInstance, ffmpegCfg, timeout, logger); err != nil {
+			logger.Warn("transcode one returned error (still committing to avoid retry loop)",
+				zap.Uint("video_id", m.VideoID),
+				zap.Error(err))
 		}
-
-		// 3. Qos=10：未 ack 消息超过 10 条时 broker 停止推送
-		//    转码是 CPU 密集型，限制并发避免压垮 worker
-		if err := ch.Qos(10, 0, false); err != nil {
-			logger.Warn("transcode consume: qos set failed", zap.Error(err))
-			time.Sleep(time.Second)
-			continue
-		}
-
-		// 4. 注册消费者：autoAck=false 让我们能精确控制 ack 时机
-		msgs, err := ch.Consume(redis_repo.TranscodeQueueName, "", false, false, false, false, nil)
-		if err != nil {
-			logger.Warn("transcode consume: consume register failed", zap.Error(err))
-			time.Sleep(time.Second)
-			continue
-		}
-
-		logger.Info("transcode consume registered, waiting for messages")
-
-		// 5. 内层消息处理循环
-		//    msgs channel 在以下情况会关闭：
-		//      - Connection 断开（broker 端断开 socket）
-		//      - ch.Cancel() 被调用
-		//    此时 for range 退出，回到外层重新 WaitReady
-		for msg := range msgs {
-			// 停机信号优先：先 nack + requeue 让消息回到 broker，再退出
-			select {
-			case <-ctx.Done():
-				_ = msg.Nack(false, true)
-				return
-			default:
-			}
-
-			var m cache.TranscodeMsg
-			if err := json.Unmarshal(msg.Body, &m); err != nil {
-				// 消息体损坏：nack(requeue=false) 让它进死信或被丢弃
-				logger.Warn("transcode consume: invalid message body, dropping",
-					zap.Error(err),
-					zap.Int("body_len", len(msg.Body)))
-				_ = msg.Nack(false, false)
-				continue
-			}
-
-			// transcodeOne 内部已处理失败场景（写入 status=failed），
-			// 任意返回值都视为"已处理"，Ack 消息不再重投
-			if err := transcodeOne(ctx, m, db, storageInstance, ffmpegCfg, tempDir, videoSearchRepo, logger); err != nil {
-				logger.Warn("transcode one returned error (still acking to avoid retry loop)",
-					zap.Uint("video_id", m.VideoID),
-					zap.Error(err))
-			}
-			_ = msg.Ack(false)
-		}
-
-		// 走到这里说明 msgs channel 关闭（broker 断开 / channel 被 cancel）
-		// 回到外层 WaitReady 重新订阅
-		logger.Warn("transcode consume channel closed, will re-subscribe after reconnect")
-	}
+		return nil
+	})
 }
 
-// transcodeOne 处理单条转码消息：调用 ffmpeg 转码 → 截帧生成封面（如需）→ 上传 → 更新 DB。
+// transcodeOne 处理单条转码消息：下载源文件 → ffmpeg 转码 → 截帧生成封面 → 上传 → 更新 DB。
 //
 // 流程：
 //  1. 标记 status=transcoding，让前端轮询能看到"正在转码"
-//  2. 准备输出目录 {tempDir}/transcoded/，避免与上传目录混用
-//  3. 调用 ffmpeg -i {draft} -c:v libx264 -preset medium -crf 23 -c:a aac -y {output}.mp4
+//  2. 从对象存储下载 SourceKey 到本机临时目录（worker 唯一允许使用本地磁盘的场景）
+//  3. 调用 ffmpeg -i {source} -c:v libx264 -preset medium -crf 23 -c:a aac -y {output}.mp4
 //     使用 CommandContext 绑定超时，避免 ffmpeg 卡死拖垮 worker
-//  4. 失败：截取 stderr 末尾 2000 字符作为 fail_reason，写入 status=failed，返回 nil（Ack）
+//  4. 失败：截取 stderr 末尾 2000 字符作为 fail_reason，写入 status=failed，清理源对象并返回 nil（Ack）
 //  5. 成功：用 ffprobe 解析时长
-//  6. 若 DraftCoverPath 为空：调用 ffmpeg -ss {duration/2} -i {draft} -frames:v 1 截帧生成 JPG
-//  7. 通过 storage.Put 上传 video 和 cover 到 {video}/{videoID}.mp4 / {cover}/{videoID}.jpg
+//  6. 若 SourceCoverKey 为空：调用 ffmpeg -ss {duration/2} -i {source} -frames:v 1 截帧生成 JPG
+//  7. 通过 storagex.Put 上传 video 和 cover 到 video/{videoID}.mp4 / cover/{videoID}.jpg
 //  8. UPDATE videos SET video_url, cover_url, duration_sec, status='published' WHERE id=?
 //
 // 返回值约定：
 //   - nil：转码流程结束（无论成功或失败，DB 状态已正确）
 //   - error：仅用于不可恢复的内部错误（如 DB 不可达）；调用方仍会 Ack
-func transcodeOne(ctx context.Context, msg cache.TranscodeMsg, db *gorm.DB, storageInstance storage.Storage, ffmpegCfg config.FFmpegConfig, tempDir string, videoSearchRepo interfaces.VideoSearchRepository, logger *zap.Logger) error {
+func transcodeOne(ctx context.Context, msg cache.TranscodeMsg, db *gorm.DB, storageInstance storagex.Storage, ffmpegCfg config.FFmpegConfig, timeout time.Duration, logger *zap.Logger) error {
+	// 关键路径日志统一带 trace_id/span_id：转码失败后可在 Tempo 按 video_id 找到链路，
+	// 再通过 trace_id 检索这段 ffmpeg / 上传 / DB 的日志。
+	logger = otelx.Logger(logger, ctx)
+
 	// 1. 标记 status=transcoding，让前端轮询能看到"正在转码"
-	//    使用裸 db.Model 而不是 VideoDraftRepo.UpdateTranscodeResult，因为 worker 进程
+	//    使用裸 db.Model 而不是 VideoRepo.UpdateTranscodeResult，因为 worker 进程
 	//    没有 Repos 容器（Repos 是 API 进程的依赖聚合）
-	if err := db.WithContext(ctx).Model(&database.Video{}).
+	if err := db.WithContext(ctx).Model(&model.Video{}).
 		Where("id = ?", msg.VideoID).
 		Update("status", "transcoding").Error; err != nil {
 		logger.Warn("transcode: failed to mark transcoding",
@@ -149,25 +93,52 @@ func transcodeOne(ctx context.Context, msg cache.TranscodeMsg, db *gorm.DB, stor
 		// 继续转码：标记失败不应阻止后续步骤
 	}
 
-	// 2. 准备输出目录
-	outDir := filepath.Join(tempDir, "transcoded")
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		// 目录创建失败是致命错误：写不进去就无法转码
-		failReason := truncateErr(fmt.Sprintf("mkdir transcoded dir failed: %v", err))
-		_ = db.WithContext(ctx).Model(&database.Video{}).
+	// 2. 本机临时目录：下载源文件 + 存放 ffmpeg 产物，函数结束时整体清理
+	tmpDir, err := os.MkdirTemp("", "fake-tiktok-transcode-*")
+	if err != nil {
+		failReason := truncateErr(fmt.Sprintf("create temp dir failed: %v", err))
+		_ = db.WithContext(ctx).Model(&model.Video{}).
+			Where("id = ?", msg.VideoID).
+			Updates(map[string]interface{}{"status": "failed", "fail_reason": failReason})
+		cleanupObjects(ctx, storageInstance, logger, msg.VideoID, msg.SourceKey, msg.SourceCoverKey)
+		return nil
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// 源视频 key 为空说明消息体异常（旧版本消息无 SourceKey），直接失败
+	if msg.SourceKey == "" {
+		failReason := truncateErr("transcode: empty source key")
+		_ = db.WithContext(ctx).Model(&model.Video{}).
 			Where("id = ?", msg.VideoID).
 			Updates(map[string]interface{}{"status": "failed", "fail_reason": failReason})
 		return nil
 	}
 
-	outputPath := filepath.Join(outDir, fmt.Sprintf("%d.mp4", msg.VideoID))
+	// 3. 下载源视频到临时文件
+	inputPath := filepath.Join(tmpDir, "source"+filepath.Ext(msg.SourceKey))
+	if err := downloadToFile(ctx, storageInstance, msg.SourceKey, inputPath); err != nil {
+		failReason := truncateErr(fmt.Sprintf("download source failed: %v", err))
+		logger.Warn("transcode: download source failed",
+			zap.Uint("video_id", msg.VideoID),
+			zap.String("source_key", msg.SourceKey),
+			zap.Error(err))
+		_ = db.WithContext(ctx).Model(&model.Video{}).
+			Where("id = ?", msg.VideoID).
+			Updates(map[string]interface{}{"status": "failed", "fail_reason": failReason})
+		cleanupObjects(ctx, storageInstance, logger, msg.VideoID, msg.SourceKey)
+		return nil
+	}
 
-	// 3. 调用 ffmpeg 转码
-	//    超时通过 ctx 控制：30 分钟兜底，足够覆盖 1GB 视频的转码时间
-	//    （libx264 medium preset 在主流 CPU 上约 30~60fps，1GB / 5Mbps ≈ 30 分钟视频）
-	//    注意：ffmpeg 的 -y 表示覆盖输出，避免交互式提示阻塞
-	//    TODO(Phase 5): 从 config.TranscodeConfig.Timeout 注入更精确的超时
-	transcodeCtx, transcodeCancel := context.WithTimeout(ctx, 30*time.Minute)
+	// 4. 准备输出文件
+	outputPath := filepath.Join(tmpDir, fmt.Sprintf("%d.mp4", msg.VideoID))
+
+	// 5. 调用 ffmpeg 转码
+	//    超时由 APP_TRANSCODE_TIMEOUT（秒）控制，默认 30 分钟，足够覆盖 1GB 视频
+	//    （5Mbps ≈ 30 分钟）在主流 CPU 上的重编码耗时；ffmpeg 用 -y 覆盖输出，避免交互提示阻塞。
+	if timeout <= 0 {
+		timeout = 30 * time.Minute
+	}
+	transcodeCtx, transcodeCancel := context.WithTimeout(ctx, timeout)
 	defer transcodeCancel()
 
 	ffmpegBin := ffmpegCfg.BinaryPath
@@ -195,7 +166,7 @@ func transcodeOne(ctx context.Context, msg cache.TranscodeMsg, db *gorm.DB, stor
 	//   - -maxrate/-bufsize：限制峰值码率，避免对已经压过的源重编码后
 	//     文件比源还大（如 28.9M 源转出 45M），导致流式播放带宽不足而缓冲卡顿。
 	cmd := exec.CommandContext(transcodeCtx, ffmpegBin,
-		"-i", msg.DraftRawPath,
+		"-i", inputPath,
 		"-c:v", outputCodec,
 		"-preset", preset,
 		"-crf", strconv.Itoa(crf),
@@ -219,15 +190,14 @@ func transcodeOne(ctx context.Context, msg cache.TranscodeMsg, db *gorm.DB, stor
 		logger.Warn("transcode: ffmpeg failed",
 			zap.Uint("video_id", msg.VideoID),
 			zap.String("fail_reason", failReason))
-		_ = db.WithContext(ctx).Model(&database.Video{}).
+		_ = db.WithContext(ctx).Model(&model.Video{}).
 			Where("id = ?", msg.VideoID).
 			Updates(map[string]interface{}{"status": "failed", "fail_reason": failReason})
-		// 清理可能产生的部分输出文件
-		_ = os.Remove(outputPath)
+		cleanupObjects(ctx, storageInstance, logger, msg.VideoID, msg.SourceKey, msg.SourceCoverKey)
 		return nil
 	}
 
-	// 4. 解析视频时长：使用 ffprobe（默认在 PATH 中）
+	// 6. 解析视频时长：使用 ffprobe（默认在 PATH 中）
 	//    ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {output}
 	durationCtx, durationCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer durationCancel()
@@ -255,20 +225,28 @@ func transcodeOne(ctx context.Context, msg cache.TranscodeMsg, db *gorm.DB, stor
 		}
 	}
 
-	// 5. 准备封面文件
-	//    若 DraftCoverPath 已指定（用户上传时自带），直接复用
-	//    否则调用 ffmpeg -ss {duration/2} -i {draft} -frames:v 1 截帧生成 JPG
+	// 7. 准备封面文件
+	//    若 SourceCoverKey 已指定（用户上传时自带），先下载到本地复用
+	//    否则调用 ffmpeg -ss {duration/2} -i {source} -frames:v 1 截帧生成 JPG
 	var coverLocalPath string
-	if msg.DraftCoverPath != "" {
-		coverLocalPath = msg.DraftCoverPath
-	} else {
-		coverLocalPath = filepath.Join(outDir, fmt.Sprintf("%d_cover.jpg", msg.VideoID))
+	if msg.SourceCoverKey != "" {
+		coverLocalPath = filepath.Join(tmpDir, "cover"+filepath.Ext(msg.SourceCoverKey))
+		if err := downloadToFile(ctx, storageInstance, msg.SourceCoverKey, coverLocalPath); err != nil {
+			logger.Warn("transcode: download source cover failed, will extract frame",
+				zap.Uint("video_id", msg.VideoID),
+				zap.String("cover_key", msg.SourceCoverKey),
+				zap.Error(err))
+			coverLocalPath = ""
+		}
+	}
+	if coverLocalPath == "" {
+		coverLocalPath = filepath.Join(tmpDir, fmt.Sprintf("%d_cover.jpg", msg.VideoID))
 		// 取视频中间时刻截帧，避免开头黑屏
 		ssTime := duration / 2
 		coverCtx, coverCancel := context.WithTimeout(ctx, 30*time.Second)
 		coverCmd := exec.CommandContext(coverCtx, ffmpegBin,
 			"-ss", strconv.FormatFloat(ssTime, 'f', 3, 64),
-			"-i", msg.DraftRawPath,
+			"-i", inputPath,
 			"-frames:v", "1",
 			"-y", coverLocalPath,
 		)
@@ -285,14 +263,15 @@ func transcodeOne(ctx context.Context, msg cache.TranscodeMsg, db *gorm.DB, stor
 		coverCancel()
 	}
 
-	// 6. 上传视频文件到 Storage
+	// 8. 上传视频文件到对象存储（DB 只保存 key）
 	videoFile, err := os.Open(outputPath)
 	if err != nil {
 		// 致命：转码好的文件打不开，标记失败
 		failReason := truncateErr(fmt.Sprintf("open transcoded video failed: %v", err))
-		_ = db.WithContext(ctx).Model(&database.Video{}).
+		_ = db.WithContext(ctx).Model(&model.Video{}).
 			Where("id = ?", msg.VideoID).
 			Updates(map[string]interface{}{"status": "failed", "fail_reason": failReason})
+		cleanupObjects(ctx, storageInstance, logger, msg.VideoID, msg.SourceKey, msg.SourceCoverKey)
 		return nil
 	}
 	videoKey := fmt.Sprintf("video/%d.mp4", msg.VideoID)
@@ -300,27 +279,28 @@ func transcodeOne(ctx context.Context, msg cache.TranscodeMsg, db *gorm.DB, stor
 	if fi, statErr := videoFile.Stat(); statErr == nil {
 		videoSize = fi.Size()
 	}
-	videoURL, err := storageInstance.Put(ctx, videoKey, videoFile, videoSize)
+	err = storageInstance.Put(ctx, videoKey, videoFile, videoSize)
 	_ = videoFile.Close()
 	if err != nil {
 		failReason := truncateErr(fmt.Sprintf("upload video to storage failed: %v", err))
-		_ = db.WithContext(ctx).Model(&database.Video{}).
+		_ = db.WithContext(ctx).Model(&model.Video{}).
 			Where("id = ?", msg.VideoID).
 			Updates(map[string]interface{}{"status": "failed", "fail_reason": failReason})
+		cleanupObjects(ctx, storageInstance, logger, msg.VideoID, msg.SourceKey, msg.SourceCoverKey)
 		return nil
 	}
 
-	// 7. 上传封面文件到 Storage（若有）
-	var coverURL string
+	// 9. 上传封面文件到对象存储（若有）
+	var coverKey string
 	if coverLocalPath != "" {
 		coverFile, err := os.Open(coverLocalPath)
 		if err == nil {
-			coverKey := fmt.Sprintf("cover/%d.jpg", msg.VideoID)
+			coverKey = fmt.Sprintf("cover/%d.jpg", msg.VideoID)
 			var coverSize int64
 			if fi, statErr := coverFile.Stat(); statErr == nil {
 				coverSize = fi.Size()
 			}
-			coverURL, err = storageInstance.Put(ctx, coverKey, coverFile, coverSize)
+			err = storageInstance.Put(ctx, coverKey, coverFile, coverSize)
 			_ = coverFile.Close()
 		}
 		if err != nil {
@@ -328,71 +308,67 @@ func transcodeOne(ctx context.Context, msg cache.TranscodeMsg, db *gorm.DB, stor
 			logger.Warn("transcode: cover upload failed, cover_url will be empty",
 				zap.Uint("video_id", msg.VideoID),
 				zap.Error(err))
-			coverURL = ""
+			_ = storageInstance.Delete(ctx, coverKey)
+			coverKey = ""
 		}
 	}
 
-	// 8. 更新 DB：写入 video_url / cover_url / duration_sec / status=published
-	//    使用 Updates(map[...]) 确保零值字段也被写入
-	if err := db.WithContext(ctx).Model(&database.Video{}).
+	// 10. 更新 DB：写入 video_url / cover_url（对象 key）/ duration_sec / status=published
+	//     使用 Updates(map[...]) 确保零值字段也被写入
+	if err := db.WithContext(ctx).Model(&model.Video{}).
 		Where("id = ?", msg.VideoID).
 		Updates(map[string]interface{}{
-			"play_url":     videoURL,
-			"cover_url":    coverURL,
+			"play_url":     videoKey,
+			"cover_url":    coverKey,
 			"duration_sec": duration,
 			"status":       "published",
 		}).Error; err != nil {
 		logger.Error("transcode: failed to update video status to published",
 			zap.Uint("video_id", msg.VideoID),
 			zap.Error(err))
+		// 清理已上传的产物，保持 DB 与存储一致
+		cleanupObjects(ctx, storageInstance, logger, msg.VideoID, videoKey, coverKey)
 		return err
 	}
 
-	// 8.5 更新作者投稿数 video_count +1
-	if err := db.WithContext(ctx).Model(&database.Account{}).
-		Where("id = ?", msg.UserID).
-		UpdateColumn("video_count", gorm.Expr("video_count + 1")).Error; err != nil {
-		// 非致命错误：视频已发布成功，仅记日志
-		logger.Warn("transcode: failed to increment video_count",
-			zap.String("user_id", msg.UserID),
-			zap.Uint("video_id", msg.VideoID),
-			zap.Error(err))
-	}
-
-	// 8.5 索引视频到 ES（搜索功能依赖）
-	//     转码完成、status=published 后立即写入 ES，使新视频可被搜索到
-	//     ES 索引失败不影响发布流程（视频已可正常播放），仅记日志
-	if videoSearchRepo != nil {
-		indexVideoToES(ctx, db, videoSearchRepo, msg.VideoID, logger)
-	}
-
-	// 8.6 视频发布后通知作者的所有粉丝（best-effort，失败仅记日志）
-	var vTitle string
-	var v database.Video
-	if err := db.WithContext(ctx).Select("title").First(&v, msg.VideoID).Error; err == nil {
-		vTitle = v.Title
-	}
-	notifyFollowersOnVideoPublish(ctx, db, logger, msg.UserID, msg.VideoID, vTitle)
-
-	// 9. 转码成功后清理临时文件（draft 原始视频 + 转码输出）
-	//    清理失败仅记日志，不影响业务流程
-	//    注意：DraftCoverPath 若是用户上传的，也应一起清理
-	_ = os.Remove(outputPath)
-	if coverLocalPath != msg.DraftCoverPath {
-		// 截帧生成的封面在 outDir，清理它
-		_ = os.Remove(coverLocalPath)
-	}
-	// draft 原始文件保留由后续清理任务处理（避免清理后用户立即重传同名文件冲突）
+	// 11. 转码成功后清理源对象（video/src/{id}.* 与 cover/src/{id}.*）
+	//     清理失败仅记日志，不影响业务流程；本机临时文件由 defer 清理。
+	cleanupObjects(ctx, storageInstance, logger, msg.VideoID, msg.SourceKey, msg.SourceCoverKey)
 
 	logger.Info("transcode: success",
 		zap.Uint("video_id", msg.VideoID),
 		zap.Float64("duration", duration),
-		zap.String("video_url", videoURL),
-		zap.String("cover_url", coverURL))
+		zap.String("video_key", videoKey),
+		zap.String("cover_key", coverKey))
 	return nil
 }
 
-// truncateErr 把 fail_reason 截断到 2000 字符以内，匹配 database.Video.FailReason 的 gorm size:2000。
+// downloadToFile 从对象存储下载 key 到本地 dest 路径。
+func downloadToFile(ctx context.Context, storageInstance storagex.Storage, key, dest string) error {
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return storagex.Download(ctx, storageInstance, key, f)
+}
+
+// cleanupObjects 删除对象 key（空 key 跳过），删除失败只记日志。
+func cleanupObjects(ctx context.Context, storageInstance storagex.Storage, logger *zap.Logger, videoID uint, keys ...string) {
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if err := storageInstance.Delete(ctx, key); err != nil {
+			logger.Warn("transcode: cleanup object failed",
+				zap.Uint("video_id", videoID),
+				zap.String("key", key),
+				zap.Error(err))
+		}
+	}
+}
+
+// truncateErr 把 fail_reason 截断到 2000 字符以内，匹配 model.Video.FailReason 的 gorm size:2000。
 // 截取末尾部分（最近发生的错误更相关）。
 func truncateErr(s string) string {
 	const max = 2000
@@ -401,90 +377,4 @@ func truncateErr(s string) string {
 	}
 	// 保留末尾 max 字符：最近的 ffmpeg 错误信息通常最有用
 	return "..." + s[len(s)-max+3:]
-}
-
-// notifyFollowersOnVideoPublish 视频发布后通知作者的所有粉丝（best-effort）。
-//
-// worker 不持有 NotificationLogic / repository 注入，故直接用 db 完成：
-//   - 分页拉取粉丝 ID（避免一次性拉全量撑爆内存 / 长事务）
-//   - 批量写入 Notification 表（Type=new_video）
-// 任何步骤失败仅记日志，不影响视频发布主流程。
-func notifyFollowersOnVideoPublish(ctx context.Context, db *gorm.DB, logger *zap.Logger, authorID string, videoID uint, title string) {
-	// 作者名（仅用于通知展示，缺失时降级为"某人"）
-	var author database.Account
-	if err := db.WithContext(ctx).Select("username").First(&author, "id = ?", authorID).Error; err != nil {
-		logger.Warn("notify video publish: query author failed",
-			zap.String("author_id", authorID), zap.Error(err))
-		author.Username = "某人"
-	}
-
-	const pageSize = 200
-	for page := 1; ; page++ {
-		var followerIDs []string
-		if err := db.WithContext(ctx).Model(&database.UserFollow{}).
-			Where("followee_id = ?", authorID).
-			Order("id ASC").
-			Limit(pageSize).Offset((page - 1) * pageSize).
-			Pluck("follower_id", &followerIDs).Error; err != nil {
-			logger.Warn("notify video publish: list followers failed",
-				zap.String("author_id", authorID), zap.Error(err))
-			return
-		}
-		if len(followerIDs) == 0 {
-			return
-		}
-
-		senderNames, _ := json.Marshal([]string{author.Username})
-		payload, _ := json.Marshal(map[string]any{
-			"title":       title,
-			"target_type": "new_video",
-			"target_id":   strconv.FormatUint(uint64(videoID), 10),
-		})
-		notifs := make([]database.Notification, 0, len(followerIDs))
-		relatedID := strconv.FormatUint(uint64(videoID), 10)
-		for _, fid := range followerIDs {
-			notifs = append(notifs, database.Notification{
-				RecipientID:     fid,
-				Type:             "new_video",
-				RelatedID:        relatedID,
-				SenderNamesJSON:  string(senderNames),
-				PayloadJSON:      string(payload),
-			})
-		}
-		if err := db.WithContext(ctx).Create(&notifs).Error; err != nil {
-			logger.Warn("notify video publish: insert notifications failed",
-				zap.String("author_id", authorID), zap.Error(err))
-			return
-		}
-		if len(followerIDs) < pageSize {
-			return
-		}
-	}
-}
-
-// indexVideoToES 查询视频及其作者，构造 ES 文档并写入索引。
-// 用于转码完成后将新发布的视频加入搜索索引。
-// 任何步骤失败都仅记日志，不影响视频发布流程。
-func indexVideoToES(ctx context.Context, db *gorm.DB, repo interfaces.VideoSearchRepository, videoID uint, logger *zap.Logger) {
-	var video database.Video
-	if err := db.WithContext(ctx).First(&video, videoID).Error; err != nil {
-		logger.Warn("index to ES: query video failed",
-			zap.Uint("video_id", videoID), zap.Error(err))
-		return
-	}
-	var author database.Account
-	if err := db.WithContext(ctx).First(&author, "id = ?", video.AuthorID).Error; err != nil {
-		logger.Warn("index to ES: query author failed",
-			zap.Uint("video_id", videoID), zap.Error(err))
-		return
-	}
-	doc := es.NewVideoDocumentFromVideo(video, author.Username)
-	if err := repo.IndexVideo(ctx, doc); err != nil {
-		logger.Warn("index to ES: IndexVideo failed",
-			zap.Uint("video_id", videoID), zap.Error(err))
-		return
-	}
-	logger.Info("index to ES: success",
-		zap.Uint("video_id", videoID),
-		zap.String("title", video.Title))
 }

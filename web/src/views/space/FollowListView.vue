@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { UserPlus, UserCheck, Users, MessageCircle } from 'lucide-vue-next'
+import { UserPlus, UserCheck, Users } from 'lucide-vue-next'
 import { getFollowers, getFollowing } from '@/api/follow'
 import { followUser, unfollowUser } from '@/api/interaction'
 import { useUserStore } from '@/stores/user'
@@ -64,11 +64,6 @@ function goToUser(id: string) {
   router.push(`/user/${id}`)
 }
 
-// 从关注/粉丝列表直接给对方发起私信（无需手动输入对方 ID）
-function goMessage(id: string) {
-  router.push(`/space/notifications?tab=message&peer=${id}`)
-}
-
 onMounted(load)
 watch(() => props.mode, load)
 watch(() => page.value, load)
@@ -93,10 +88,10 @@ watch(() => page.value, load)
           class="flex items-center gap-3 py-3"
         >
           <img
-            :src="item.avatar_url || '/uploads/avatar/default.jpg'"
+            :src="item.avatar_url || '/images/avatar-default.jpg'"
             :alt="item.username"
             class="w-12 h-12 rounded-full object-cover cursor-pointer"
-            @error="($event.target as HTMLImageElement).src = '/uploads/avatar/default.jpg'"
+            @error="($event.target as HTMLImageElement).src = '/images/avatar-default.jpg'"
             @click="goToUser(item.id)"
           />
           <div class="flex-1 min-w-0 cursor-pointer" @click="goToUser(item.id)">
@@ -116,14 +111,6 @@ watch(() => page.value, load)
           >
             <component :is="item.is_followed ? UserCheck : UserPlus" :size="14" />
             {{ item.is_followed ? '已关注' : '关注' }}
-          </button>
-          <button
-            v-if="item.id !== userStore.userInfo?.id"
-            class="flex items-center gap-1 px-3 h-8 rounded text-xs font-medium bg-surface-subtle text-ink-secondary hover:bg-surface-muted transition"
-            @click="goMessage(item.id)"
-          >
-            <MessageCircle :size="14" />
-            私信
           </button>
         </div>
       </div>

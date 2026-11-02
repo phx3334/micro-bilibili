@@ -77,7 +77,7 @@ function goUser(e: MouseEvent) {
       </h3>
       <div class="mt-1.5 flex items-center gap-1.5 text-xs text-ink-muted">
         <img
-          :src="video.up_avatar || '/uploads/avatar/default.jpg'"
+          :src="video.up_avatar || '/images/avatar-default.jpg'"
           :alt="video.up_name"
           class="w-4 h-4 rounded-full object-cover shrink-0"
           @error="($event.target as HTMLImageElement).style.display = 'none'"

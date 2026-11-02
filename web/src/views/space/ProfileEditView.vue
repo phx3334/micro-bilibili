@@ -124,10 +124,10 @@ onMounted(loadProfile)
     <div class="flex items-center gap-4 pb-6 mb-6 border-b border-surface-muted">
       <div class="relative">
         <img
-          :src="avatarUrl || '/uploads/avatar/default.jpg'"
+          :src="avatarUrl || '/images/avatar-default.jpg'"
           alt="avatar"
           class="w-20 h-20 rounded-full object-cover border border-surface-muted"
-          @error="($event.target as HTMLImageElement).src = '/uploads/avatar/default.jpg'"
+          @error="($event.target as HTMLImageElement).src = '/images/avatar-default.jpg'"
         />
         <label
           class="absolute inset-0 flex items-center justify-center bg-black/40 text-white rounded-full opacity-0 hover:opacity-100 cursor-pointer transition"
